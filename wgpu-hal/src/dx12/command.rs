@@ -75,6 +75,7 @@ impl Drop for super::CommandEncoder {
     fn drop(&mut self) {
         use crate::CommandEncoder;
         unsafe { self.discard_encoding() }
+        self.free_intermediate_copy_bufs();
 
         let mut rtv_pool = self.rtv_pool.lock();
         for handle in self.temp_rtv_handles.drain(..) {
@@ -87,6 +88,19 @@ impl Drop for super::CommandEncoder {
 }
 
 impl super::CommandEncoder {
+    /// Frees the intermediate buffers made for unaligned buffer/texture copies.
+    ///
+    /// Dropping them would release the D3D12 resources but never return their
+    /// allocations to the memory allocator, so the heap space would stay in use
+    /// until the device is destroyed.
+    fn free_intermediate_copy_bufs(&mut self) {
+        let bufs = mem::take(&mut self.intermediate_copy_bufs);
+        let ctx = super::suballocation::DeviceAllocationContext::from(&*self);
+        for buf in bufs {
+            ctx.free_resource(buf.resource, buf.allocation);
+        }
+    }
+
     unsafe fn begin_pass(&mut self, kind: super::PassKind, label: crate::Label) {
         let list = self.list.as_ref().unwrap();
         self.pass.kind = kind;
@@ -440,7 +454,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
         Ok(super::CommandBuffer { raw })
     }
     unsafe fn reset_all<I: Iterator<Item = super::CommandBuffer>>(&mut self, command_buffers: I) {
-        self.intermediate_copy_bufs.clear();
+        self.free_intermediate_copy_bufs();
         for cmd_buf in command_buffers {
             self.free_lists.push(cmd_buf.raw);
         }
